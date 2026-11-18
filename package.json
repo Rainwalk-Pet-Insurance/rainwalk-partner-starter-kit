@@ -1,0 +1,25 @@
+{
+  "name": "rainwalk-partner-starter-kit",
+  "private": true,
+  "workspaces": [
+    "packages/partner-sdk",
+    "examples/partner-quickstart"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build:sdk": "npm run build -w @rainwalk/partner-sdk",
+    "generate:sdk": "npm run generate -w @rainwalk/partner-sdk",
+    "dev:partner": "npm run build:sdk && npm run dev -w @rainwalk/partner-quickstart",
+    "check:partner": "npm run check:generated -w @rainwalk/partner-sdk && npm run build:sdk && npm test -w @rainwalk/partner-sdk && npm run test:package -w @rainwalk/partner-sdk && npm test -w @rainwalk/partner-quickstart && npm run typecheck -w @rainwalk/partner-quickstart && npm run build -w @rainwalk/partner-quickstart",
+    "test:release": "node --test scripts/*.test.mjs",
+    "release:artifacts": "node scripts/build-release.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
+  },
+  "devDependencies": {
+    "fflate": "0.8.2"
+  },
+  "license": "MIT",
+  "version": "0.1.0"
+}

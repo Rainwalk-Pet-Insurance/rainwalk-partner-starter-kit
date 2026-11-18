@@ -1,0 +1,40 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Require a matching version from reviewed main history
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/check-release-version.mjs "$RELEASE_TAG"
+          git merge-base --is-ancestor HEAD origin/main
+      - run: npm ci --ignore-scripts
+      - run: npm run test:release
+      - run: npm run verify:release
+      - run: npm run release:artifacts
+      - name: Publish the versioned source ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/*.zip release/*.sha256 --verify-tag --title "Starter kit $RELEASE_TAG" --generate-notes

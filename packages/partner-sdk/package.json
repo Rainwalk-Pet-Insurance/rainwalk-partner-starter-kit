@@ -1,0 +1,45 @@
+{
+  "name": "@rainwalk/partner-sdk",
+  "version": "0.1.0",
+  "description": "Server-side TypeScript client for Rainwalk Partner API v1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ../../docs/partner-api-v1.openapi.yaml -o src/schema.d.ts --default-non-nullable false",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('src/schema.d.ts', 'dist/schema.d.ts')\"",
+    "test": "node --test tests/*.test.mjs",
+    "prepack": "npm run build",
+    "check:generated": "openapi-typescript ../../docs/partner-api-v1.openapi.yaml -o src/schema.d.ts --default-non-nullable false --check",
+    "test:package": "node scripts/verify-package.mjs"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.10.1",
+    "typescript": "^5.9.3",
+    "@types/node": "^24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rainwalk-Pet-Insurance/rainwalk-partner-starter-kit.git",
+    "directory": "packages/partner-sdk"
+  },
+  "homepage": "https://github.com/Rainwalk-Pet-Insurance/rainwalk-partner-starter-kit#readme",
+  "bugs": {
+    "url": "https://github.com/Rainwalk-Pet-Insurance/rainwalk-partner-starter-kit/issues"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,2850 @@
+openapi: 3.1.0
+info:
+  title: Rainwalk Partner API v1
+  version: 1.0.0
+  description: |
+    ## Partner API v1
+
+    Sandbox access and production activation require separate onboarding and
+    approval; this reference
+    is not a production certification or service-level commitment.
+
+    Rainwalk provides a server-to-server HTTP API for partners building their own
+    quote and checkout experience. The purchase journey is quote → select plan →
+    register an approved payment reference → bind → retrieve policy and payment status.
+    Rainwalk owns eligibility, pricing, payment decisions, and policy state.
+
+    ### Environments and access
+
+    - Production API: https://api.rainwalk.io/partner/v1
+    - Sandbox API: https://dev.api.rainwalk.io/partner/v1
+    - Readable reference: https://api.rainwalk.io/api/schema/redoc/partner/v1
+    - Downloadable OpenAPI: https://api.rainwalk.io/api/schema/partner/v1
+
+    Reading this documentation requires no API key. Calling the API requires an
+    approved partner, an environment-specific credential, enabled rollout access,
+    and the capability named on each operation. Send `Authorization: Api-Key <key>`
+    over HTTPS from your server. Never embed credentials in browser or mobile code.
+    A capability is a Rainwalk-managed permission, not an OAuth scope requested by
+    the caller. Resources belonging to another partner behave as absent.
+
+    Arrange sandbox access, approved scopes, test payment-provider configuration,
+    and a security/integration contact with your Rainwalk partnership contact.
+    Use synthetic customer data and provider test-mode references in the sandbox.
+    Production access is a separate activation after integration certification.
+    Rotate credentials through your Rainwalk onboarding contact or approved partner
+    portal workflow; store keys in a server-side secret manager. A replacement may
+    overlap briefly with the old key, which must then be revoked.
+
+    ### Scope and limitations
+
+    Supported: quote options and breeds, quotes and 30-day price offers, plan
+    selection, approved Stripe payment references, asynchronous binds, policy and
+    billing summaries, and partner-owned webhook configuration.
+
+    Claims API access requires a separate application.
+
+    Not provided in v1: policy cancellation or changes, renewal requests, refunds,
+    payouts, document downloads/uploads, claim adjudication/status writes, raw card
+    or bank-data ingestion, or partner-supplied prices/payment outcomes. Legacy
+    `/partner/...` APIs have a separate contract and are not rewritten to v1.
+
+    ### Quickstart
+
+    All examples use synthetic data and illustrative UUIDs. Prices and dates are
+    examples, not offers. Replace response identifiers with the actual values
+    returned in your environment. Every POST, PATCH, and DELETE requires its own
+    `Idempotency-Key`, retained for 24 hours per partner and endpoint. Also send
+    `Content-Type: application/json` when a body is present and optionally
+    `X-Correlation-Id` for your own support trace.
+
+    #### 1. Load form choices
+
+    Call `GET /quote-inputs` and
+    `GET /breed-lists?postal_code=78701`. Use the returned selectable values and
+    canonical breed names. Supply both a supported address state and its matching
+    ZIP in quote requests; do not rely on ZIP-only inference. Cache each response for up to 24 hours, then revalidate
+    its ETag using `If-None-Match`; `304` means reuse the cached body. These lists
+    help build forms and do not guarantee eligibility or price. An uncovered
+    location returns empty breed lists with `coverage_status: uncovered`.
+    #### 2. Create a quote
+
+    POST the following body to `/quotes` with a new
+    idempotency key. The response contains `data.id` and `data.offers[]`.
+
+    ```json
+    {"policyholder":{"first_name":"Ava","last_name":"Ng","email":"ava@example.test","phone":"2125550123","address":{"line1":"1 Main St","line2":"","city":"Austin","state":"TX","postal_code":"78701"}},"pet":{"name":"Mochi","species":"dog","breed":"Mixed Breed","birth_date":"2022-05-14","sex":"female","spayed_or_neutered":true},"coverage_preferences":{"annual_limit":15000,"deductible":500,"reimbursement_percent":80}}
+    ```
+
+    Choose a breed actually returned for the selected state. Supply the real pet
+    birth date; future dates and unsupported rating ages are rejected. A legacy
+    `pet_age` input remains supported, but birth date allows accurate re-rating.
+    `external_customer_id` is not currently persisted or returned by quote creation;
+    keep your customer-to-quote mapping in your system.
+    #### 3. Select a plan
+
+    POST
+    `{"offer_id":"22222222-2222-4222-8222-222222222222","billing_frequency":"monthly"}`
+    to `/quotes/{quote_id}/plan-selections`. Save `data.id`. Each offer locks its
+    price for 30 days; the quote remains retrievable afterwards. Refresh an
+    unbound quote with `POST /quotes/{quote_id}/offers` and `{}` if your account
+    has the separate refresh capability. Older selections retain their prices.
+    #### 4. Register a payment reference
+
+    Stripe processing requires explicit Rainwalk approval for your partner.
+    Tokenize directly with the approved Stripe
+    integration under the account configuration agreed during onboarding. Complete
+    any customer authentication in the approved provider-hosted flow. POST to
+    `/payment-methods`:
+
+    ```json
+    {"provider":"stripe","provider_account_reference":"approved-account-reference","provider_customer_reference":"cus_example","provider_payment_method_reference":"pm_example","type":"card"}
+    ```
+
+    Never send PAN, CVV, bank-account/routing data, a client secret, or an assertion
+    that a payment settled. Only the configured Stripe partner-token integration
+    currently has an execution adapter; other providers/modes are not certified
+    by this reference. Registration returns `201`, usually with
+    `status: pending_verification`. Poll `GET /payment-methods/{id}` with backoff
+    until `approved` or `rejected`; do not bind a pending/rejected method.
+    Approval verifies the reference, not that the future charge will succeed.
+    #### Sandbox simulator
+
+    Authenticated, authorized sandbox partners can complete this journey without Stripe
+    using `provider: sandbox_simulator`, `provider_account_reference: rw_sim_account`,
+    `provider_customer_reference: rw_sim_customer`, `type: card`, and one of
+    `rw_sim_success`, `rw_sim_decline`, `rw_sim_pending`, or `rw_sim_rejected` as the
+    payment-method reference. The scenarios simulate success, charge decline,
+    processing followed by success, or reference rejection. Registration verifies
+    these references synchronously; pending charge simulation completes through
+    the normal payment execution/reconciliation workers.
+
+    Simulation is available by default to active sandbox partners with the normal
+    v1 credentials, rollout access and required capabilities. No simulator opt-in
+    is required. Production rejects simulation regardless of partner config.
+    Stripe operations instead require separate Rainwalk approval for that partner
+    in addition to provider/account configuration. The reference app defaults to
+    the simulator. Results include `simulated: true`, policies remain `test_policy`,
+    and billing is simulated/inactive. No actual charge, recurring billing,
+    document, email, or webhook delivery is performed.
+
+    #### 5. Request binding
+
+    POST the identifiers and the customer's actual consent
+    record to `/binds` with a new idempotency key:
+
+    ```json
+    {"quote_id":"11111111-1111-4111-8111-111111111111","plan_selection_id":"33333333-3333-4333-8333-333333333333","payment_method_id":"44444444-4444-4444-8444-444444444444","consent":{"accepted_at":"2026-11-16T18:00:00Z","terms_version":"version-agreed-during-onboarding"}}
+    ```
+
+    The current implementation responds `202` and processes payment asynchronously:
+
+    ```json
+    {"data":{"id":"55555555-5555-4555-8555-555555555555","status":"processing","quote_id":"11111111-1111-4111-8111-111111111111","plan_selection_id":"33333333-3333-4333-8333-333333333333","payment":{"status":"approved","attempt_id":"66666666-6666-4666-8666-666666666666","attempt_status":"pending","failure_code":null},"policy":{"id":"77777777-7777-4777-8777-777777777777","status":"payment_pending"},"created_at":"2026-11-16T18:00:01Z"}}
+    ```
+
+    #### 6. Retrieve the outcome
+
+    Poll `GET /binds/{id}` with backoff or receive a
+    webhook and retrieve the bind. `payment.status` describes reference approval;
+    `payment.attempt_status` describes the charge. A successful result has
+    `status: bound` and `payment.attempt_status: succeeded`. A failed charge has
+    `status: payment_failed`, `payment.attempt_status: failed`, and a safe
+    `failure_code`. `processing` is non-terminal, including unknown provider
+    outcomes. Do not represent a pending policy as active coverage. Retrieve
+    `GET /policies/{policy_id}` for policy number, effective date, coverage, and
+    billing summary; issued/effective values are calendar dates, not timestamps.
+    A policy can be issued before its effective date.
+
+    ### Errors, retries, and tracing
+
+    Errors use `{ "error": { "code": "...", "message": "...", "request_id": "..." } }`.
+    Optional `details` may be a field-error object or a list of field details.
+    Save the `X-Request-Id` response header for support; `X-Correlation-Id` is echoed
+    when supplied. Do not log credentials or payment references.
+
+    | Outcome | Client action |
+    | --- | --- |
+    | `400` malformed input/cursor | Correct the request; use a fresh key for a changed mutation body. |
+    | `401` invalid/expired/revoked key | Check the environment and credential; arrange rotation if needed. |
+    | `403` capability or rollout denied | Confirm access with Rainwalk; retrying does not grant permission. |
+    | `404` missing resource | Check the identifier and environment; foreign-partner resources are hidden. |
+    | `409 idempotency_key_reused` | The key was used with different bytes; never change a request under an existing key. |
+    | `409 request_in_progress` | Wait, then replay the identical request with the same key. |
+    | `409 selection_conflict` / `bind_conflict` | Retrieve existing state before attempting a new purchase; do not blindly retry. |
+    | `422 validation_error` / `offer_expired` | Correct input or refresh/select an eligible offer; use a new key for a new request. |
+    | `422 payment_method_not_approved` | Retrieve the method and wait for approval or resolve rejection. |
+    | `429` | Wait for `Retry-After`; retain the original mutation key and body. |
+    | `5xx` or network timeout | Back off and check known resources; replay exact bytes with the same key within the retention window. Contact Rainwalk for unresolved outcomes. |
+
+    An identical replay returns the original HTTP status and body with
+    `Idempotent-Replay: true`; that body is a snapshot, not the latest state.
+    GET the resource to observe changes. Do not generate a new key merely because
+    a response was lost. After 24 hours the key may be treated as new: reconcile
+    with Rainwalk before retrying an ambiguous purchase outside that window.
+
+    Safe payment failure codes include `payment_method_declined`,
+    `payment_method_expired`, `payment_authentication_required`,
+    `payment_provider_not_approved`, `payment_reference_mismatch`, and
+    `payment_not_completed`. A failed bind is terminal; coordinate recovery rather
+    than submitting a second bind for the same quote. v1 never returns a processor
+    client secret for an authentication challenge.
+
+    Read and mutation requests use separate per-partner rate-limit buckets shared
+    across v1 endpoints. Limits are environment-configurable; use `RateLimit-Limit`,
+    `RateLimit-Remaining`, `RateLimit-Reset` (Unix seconds), and `Retry-After`
+    (seconds). No specific throughput or processing-time SLA is promised here.
+
+    ### Webhook receiver guide
+
+    Create an HTTPS endpoint with `POST /webhook-endpoints`, for example:
+
+    ```json
+    {"url":"https://partner.example.test/rainwalk-events","event_types":["bind.processing","bind.bound","payment.succeeded","payment.failed","policy.issued"],"enabled":true}
+    ```
+
+    Replace the example URL with your publicly resolvable HTTPS receiver. Private,
+    loopback, and link-local destinations are rejected. Configuration PATCH accepts
+    partial changes; DELETE disables the endpoint. The signing secret is shared by
+    your partner's endpoints and returned when first created. Store it securely;
+    new-key replay responses may contain it, so protect those responses too.
+    It is not retrievable through endpoint listing.
+
+    Supported subscriptions: `bind.processing`, `bind.bound`, `bind.declined`,
+    `payment.succeeded`, `payment.failed`, `policy.issued`, `policy.status_changed`.
+    Event subscription support does not guarantee that every lifecycle change emits
+    an event; use GET resources as authoritative. A notification has this envelope:
+
+    ```json
+    {"id":"88888888-8888-4888-8888-888888888888","type":"bind.bound","occurred_at":"2026-11-16T18:00:03Z","api_version":"v1","data":{"bind_id":"55555555-5555-4555-8555-555555555555","policy_id":"77777777-7777-4777-8777-777777777777","status":"bound"}}
+    ```
+
+    Verify signatures against the **unaltered raw request bytes**, before parsing:
+
+    ```python
+    import hashlib
+    import hmac
+    import time
+
+    def valid_signature(raw_body, headers, signing_secret):
+     try:
+         timestamp = headers['X-Rainwalk-Timestamp']
+         if abs(time.time() - int(timestamp)) > 300:
+             return False
+         signed = timestamp.encode('ascii') + b'.' + raw_body
+         expected = 'v1=' + hmac.new(signing_secret.encode(), signed, hashlib.sha256).hexdigest()
+         return hmac.compare_digest(expected, headers['X-Rainwalk-Signature'])
+     except (KeyError, ValueError, UnicodeError, TypeError):
+         return False
+    ```
+
+    Verify that `X-Rainwalk-Event-Id` matches the signed body's `id`, deduplicate on
+    that event ID, durably accept/queue processing, and respond `2xx` within 10
+    seconds. Acknowledge valid duplicates too. Delivery is at-least-once and may be
+    out of order. Never assume arrival order implies policy/payment state.
+
+    Network errors and non-2xx responses (including redirects) are retried. Current
+    retry delays after failed attempts are 60, 300, 1800, 7200, 21600, and 43200
+    seconds (approximately 20.6 hours cumulatively, plus execution time). There is
+    no guaranteed delivery deadline; an invalidated destination can fail without
+    further retries. Contact your Rainwalk integration contact for exhausted
+    failures or signing-secret recovery. This API does not expose delivery history
+    or a signing-key rotation endpoint.
+
+    ### Versioning and support
+
+    `/v1` identifies the major API version. Ignore new response fields and handle
+    unknown status/event strings safely. Confirm your enabled capabilities and
+    integration requirements during onboarding.
+    For integration questions or an unresolved request, contact your assigned
+    Rainwalk partnership/support contact with environment, endpoint, UTC time,
+    request ID, and correlation ID. Exchange credentials only through the approved
+    secure onboarding channel, never in email or support examples.
+servers:
+- url: https://api.rainwalk.io/partner/v1
+  description: Production; separate activation required
+- url: https://dev.api.rainwalk.io/partner/v1
+  description: Sandbox / staging; approved test access required
+security:
+- PartnerApiKey: []
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      description: |-
+        Authenticated readiness check for partner onboarding and integration diagnostics.
+
+        Required capability: `partner.quote.read`.
+      security:
+      - PartnerApiKey: []
+      responses:
+        '200':
+          description: Partner API ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.read
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      summary: Check partner access
+  /quotes:
+    get:
+      operationId: listQuotes
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Partner-owned quotes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteList'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.read
+      description: 'Required capability: `partner.quote.read`.'
+      summary: List quotes
+    post:
+      operationId: createQuote
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteCreateRequest'
+      responses:
+        '201':
+          description: Quote offered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.create
+      description: 'Required capability: `partner.quote.create`.'
+      summary: Create a quote
+  /quotes/{quote_id}:
+    get:
+      operationId: getQuote
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/QuoteId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.read
+      description: 'Required capability: `partner.quote.read`.'
+      summary: Retrieve a quote
+  /quotes/{quote_id}/offers:
+    post:
+      operationId: refreshQuoteOffer
+      description: |-
+        Re-rate the saved quote using current eligibility and pricing, issuing a
+        new immutable offer valid for 30 days. Quotes and historical offers remain
+        retrievable after expiry. Refresh is allowed before or after expiry, but
+        not after any bind or policy exists. Existing selections keep their price.
+        Send an empty object; partner-supplied prices and input edits are rejected.
+
+        Required capability: `partner.quote.offer.refresh`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/QuoteId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '201':
+          description: Quote with newest offer first and a fresh 30-day price lock
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.offer.refresh
+      summary: Refresh a quote offer
+  /quote-inputs:
+    get:
+      operationId: getQuoteInputOptions
+      description: |-
+        Current form-safe quote constraints and selectable values. This is not an eligibility or price guarantee.
+
+        Required capability: `partner.quote.read`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IfNoneMatch'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Quote form constraints
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteInputOptions'
+        '304':
+          description: Quote form constraints unchanged
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.read
+      summary: Retrieve quote input options
+  /breed-lists:
+    get:
+      operationId: getBreedLists
+      description: |-
+        Canonical state-level dog and cat breed lists for quote-form dropdowns. Provide exactly one of state or postal_code; a valid but uncovered state returns a cacheable empty list.
+
+        Required capability: `partner.quote.read`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/State'
+      - $ref: '#/components/parameters/PostalCode'
+      - $ref: '#/components/parameters/IfNoneMatch'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Breed reference data
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BreedListOptions'
+        '304':
+          description: Breed reference data unchanged
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '400':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.read
+      summary: Retrieve breed lists
+  /quotes/{quote_id}/plan-selections:
+    post:
+      operationId: selectPlan
+      description: |-
+        Select an unexpired active offer, or recover an existing immutable selection with the same billing frequency even after offer expiry. A different frequency conflicts.
+
+        Required capability: `partner.quote.select_plan`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/QuoteId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanSelectionRequest'
+      responses:
+        '201':
+          description: Selected plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanSelection'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.quote.select_plan
+      summary: Select an offered plan
+  /payment-methods:
+    get:
+      operationId: listPaymentMethods
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Partner-owned masked payment methods
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentMethodList'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.payment_method.read
+      description: 'Required capability: `partner.payment_method.read`.'
+      summary: List payment references
+    post:
+      operationId: registerPaymentMethodReference
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentMethodReferenceRequest'
+      responses:
+        '201':
+          description: Reference registered; verification is asynchronous. Poll until approved or rejected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentMethod'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.payment_method.create
+      description: 'Required capability: `partner.payment_method.create`.'
+      summary: Register a payment reference
+  /payment-methods/{payment_method_id}:
+    get:
+      operationId: getPaymentMethod
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/PaymentMethodId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Masked payment method
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentMethod'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.payment_method.read
+      description: 'Required capability: `partner.payment_method.read`.'
+      summary: Retrieve a payment reference
+  /binds:
+    post:
+      operationId: createBind
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BindRequest'
+      responses:
+        '202':
+          description: Processing bind
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bind'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.policy.bind
+      description: 'Required capability: `partner.policy.bind`.'
+      summary: Request policy binding
+  /binds/{bind_id}:
+    get:
+      operationId: getBind
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/BindId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Bind result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bind'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.policy.read
+      description: 'Required capability: `partner.policy.read`.'
+      summary: Retrieve a bind result
+  /policies:
+    get:
+      operationId: listPolicies
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Partner-owned policies
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyList'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.policy.read
+      description: 'Required capability: `partner.policy.read`.'
+      summary: List policies
+  /policies/{policy_id}:
+    get:
+      operationId: getPolicy
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/PolicyId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.policy.read
+      description: 'Required capability: `partner.policy.read`.'
+      summary: Retrieve a policy
+  /webhook-endpoints:
+    get:
+      operationId: listWebhookEndpoints
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Partner-owned webhook endpoints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointList'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.webhook.manage
+      description: 'Required capability: `partner.webhook.manage`.'
+      summary: List webhook endpoints
+    post:
+      operationId: createWebhookEndpoint
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointRequest'
+      responses:
+        '201':
+          description: Webhook endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.webhook.manage
+      description: 'Required capability: `partner.webhook.manage`.'
+      summary: Create a webhook endpoint
+  /webhook-endpoints/{webhook_endpoint_id}:
+    patch:
+      operationId: updateWebhookEndpoint
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointUpdateRequest'
+      responses:
+        '200':
+          description: Updated endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.webhook.manage
+      description: 'Required capability: `partner.webhook.manage`.'
+      summary: Update a webhook endpoint
+    delete:
+      operationId: deleteWebhookEndpoint
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '204':
+          description: Deleted
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.webhook.manage
+      description: 'Required capability: `partner.webhook.manage`.'
+      summary: Delete a webhook endpoint
+  /claims:
+    get:
+      operationId: listClaims
+      description: |-
+        Returns only allowlisted claim summaries for caller-owned policies.
+
+        Claims API access requires a separate application.
+
+        Required capability: `partner.v1.claim.read`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Allowlisted claim summaries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimList'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.v1.claim.read
+      summary: List claim summaries
+    post:
+      operationId: submitClaim
+      description: |-
+        Policyholder-authorized first-notice submission. It is the only v1 claim write; decision, status, payout, payment, and document fields are not accepted.
+
+        Claims API access requires a separate application.
+
+        Required capability: `partner.v1.claim.create`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimSubmissionRequest'
+      responses:
+        '201':
+          description: Claim submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.v1.claim.create
+      summary: Submit a first notice of loss
+  /claims/{claim_id}:
+    get:
+      operationId: getClaim
+      description: |-
+        Returns only an allowlisted claim summary for a caller-owned policy.
+
+        Claims API access requires a separate application.
+
+        Required capability: `partner.v1.claim.read`.
+      security:
+      - PartnerApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/ClaimId'
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Allowlisted claim summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-required-capability: partner.v1.claim.read
+      summary: Retrieve a claim summary
+components:
+  securitySchemes:
+    PartnerApiKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Api-Key <key>; scopes are server-side capabilities.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 'Retained exactly 24 hours per partner and endpoint. A matching replay returns Idempotent-Replay:
+        true; a different body returns 409.'
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: Optional caller-generated support correlation value; echoed when supplied.
+      schema:
+        type: string
+        maxLength: 128
+    QuoteId:
+      name: quote_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PaymentMethodId:
+      name: payment_method_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BindId:
+      name: bind_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PolicyId:
+      name: policy_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WebhookEndpointId:
+      name: webhook_endpoint_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ClaimId:
+      name: claim_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+        maximum: 100
+        minimum: 1
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      schema:
+        type: string
+      description: ETag from a previous response for the same options or breed-list resource/location.
+    State:
+      name: state
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: ^[A-Za-z]{2}$
+      description: Two-letter US postal abbreviation. Exactly one of state or postal_code is required.
+    PostalCode:
+      name: postal_code
+      in: query
+      required: false
+      schema:
+        type: string
+        pattern: ^[0-9]{5}$
+      description: Valid US ZIP code. Exactly one of state or postal_code is required.
+  headers:
+    ETag:
+      description: Content-derived quote-input rules revision
+      schema:
+        type: string
+    CacheControl:
+      description: Partner cache policy
+      schema:
+        type: string
+    RequestId:
+      description: Rainwalk request identifier
+      schema:
+        type: string
+    CorrelationId:
+      description: Echo of a supplied X-Correlation-Id
+      schema:
+        type: string
+        maxLength: 128
+    RateLimitLimit:
+      description: Partner bucket capacity for this request class
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: Remaining partner-bucket requests in this window
+      schema:
+        type: integer
+        minimum: 0
+    RateLimitReset:
+      description: Unix timestamp for the rate-limit window reset
+      schema:
+        type: integer
+    RetryAfter:
+      description: Seconds until retry; supplied on 429 responses
+      schema:
+        type: integer
+        minimum: 1
+    IdempotentReplay:
+      description: true when the original response is replayed; GET the resource for current state.
+      schema:
+        type: string
+        enum:
+        - 'true'
+  responses:
+    Error:
+      description: Error envelope
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimitLimit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimitRemaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimitReset'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Status:
+      type: object
+      required:
+      - data
+      properties:
+        data:
+          type: object
+          required:
+          - status
+          - partner_id
+          properties:
+            status:
+              type: string
+              enum:
+              - ready
+            partner_id:
+              type: string
+              format: uuid
+    QuoteCreateRequest:
+      type: object
+      required:
+      - policyholder
+      - pet
+      - coverage_preferences
+      properties:
+        policyholder:
+          $ref: '#/components/schemas/QuotePolicyholderRequest'
+        pet:
+          $ref: '#/components/schemas/QuotePetRequest'
+        coverage_preferences:
+          $ref: '#/components/schemas/CoveragePreferences'
+      example:
+        policyholder:
+          first_name: Ava
+          last_name: Ng
+          email: ava@example.test
+          phone: '2125550123'
+          address:
+            line1: 1 Main St
+            line2: ''
+            city: Austin
+            state: TX
+            postal_code: '78701'
+        pet:
+          name: Mochi
+          species: dog
+          breed: Mixed Breed
+          birth_date: '2022-05-14'
+          sex: female
+          spayed_or_neutered: true
+        coverage_preferences:
+          annual_limit: 15000
+          deductible: 500
+          reimbursement_percent: 80
+    Quote:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/QuoteData'
+      required:
+      - data
+    QuoteList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuoteData'
+        page:
+          $ref: '#/components/schemas/CursorPage'
+      required:
+      - data
+      - page
+    QuoteData:
+      type: object
+      required:
+      - id
+      - status
+      - created_at
+      - updated_at
+      - policyholder
+      - pet
+      - coverage
+      - price
+      - latest_offer_id
+      - offers
+      - expires_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - offered
+          - bound
+          - expired
+          - ineligible
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        policyholder:
+          $ref: '#/components/schemas/QuotePolicyholder'
+        pet:
+          $ref: '#/components/schemas/QuotePet'
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        price:
+          $ref: '#/components/schemas/QuotePrice'
+        latest_offer_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        offers:
+          type: array
+          description: Immutable offers ordered newest first. Each retains its own expiration.
+          items:
+            $ref: '#/components/schemas/Offer'
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    QuoteInputOptions:
+      type: object
+      required:
+      - data
+      - rules_revision
+      - generated_at
+      - cache_ttl_seconds
+      properties:
+        data:
+          $ref: '#/components/schemas/QuoteInputData'
+        rules_revision:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        cache_ttl_seconds:
+          type: integer
+          example: 86400
+    BreedListOptions:
+      type: object
+      required:
+      - data
+      - rules_revision
+      - generated_at
+      - cache_ttl_seconds
+      properties:
+        data:
+          type: object
+          required:
+          - state
+          - coverage_status
+          - dog
+          - cat
+          properties:
+            state:
+              type: string
+              pattern: ^[A-Z]{2}$
+            coverage_status:
+              type: string
+              enum:
+              - covered
+              - uncovered
+            dog:
+              type: array
+              items:
+                type: string
+            cat:
+              type: array
+              items:
+                type: string
+        rules_revision:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        cache_ttl_seconds:
+          type: integer
+          example: 86400
+    Offer:
+      type: object
+      required:
+      - offer_id
+      - expires_at
+      - annual_limit
+      - deductible
+      - reimbursement_percent
+      - billing_options
+      - premium
+      properties:
+        offer_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        annual_limit:
+          type: integer
+        deductible:
+          type: integer
+        reimbursement_percent:
+          type: integer
+        billing_options:
+          type: array
+          items:
+            type: string
+            enum:
+            - monthly
+            - annual
+        premium:
+          $ref: '#/components/schemas/Premium'
+    PlanSelectionRequest:
+      type: object
+      required:
+      - offer_id
+      - billing_frequency
+      properties:
+        offer_id:
+          type: string
+          format: uuid
+        billing_frequency:
+          type: string
+          enum:
+          - monthly
+          - annual
+      example:
+        offer_id: 22222222-2222-4222-8222-222222222222
+        billing_frequency: monthly
+    PlanSelection:
+      type: object
+      required:
+      - data
+      properties:
+        data:
+          $ref: '#/components/schemas/PlanSelectionData'
+    PaymentMethodReferenceRequest:
+      type: object
+      required:
+      - provider
+      - provider_account_reference
+      - provider_customer_reference
+      - provider_payment_method_reference
+      - type
+      properties:
+        provider:
+          type: string
+          enum:
+          - stripe
+          - sandbox_simulator
+        provider_account_reference:
+          type: string
+          minLength: 1
+          maxLength: 255
+        provider_customer_reference:
+          type: string
+          minLength: 1
+          maxLength: 255
+        provider_payment_method_reference:
+          type: string
+          minLength: 1
+          maxLength: 255
+        type:
+          type: string
+          enum:
+          - card
+          - bank_account
+      description: Register only references supplied through the approved integration. Verification is asynchronous;
+        poll the returned resource until approved or rejected. Extra fields are not stored, and raw-payment
+        fields are forbidden recursively.
+      example:
+        provider: stripe
+        provider_account_reference: approved-account-reference
+        provider_customer_reference: cus_example
+        provider_payment_method_reference: pm_example
+        type: card
+    PaymentMethod:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PaymentMethodData'
+      required:
+      - data
+    PaymentMethodData:
+      type: object
+      properties:
+        simulated:
+          type: boolean
+          description: True only for sandbox simulator resources; no real funds or insurance coverage.
+        id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum:
+          - stripe
+          - sandbox_simulator
+        status:
+          type: string
+          enum:
+          - approved
+          - pending_verification
+          - rejected
+        type:
+          type: string
+          enum:
+          - card
+          - bank_account
+        display:
+          $ref: '#/components/schemas/MaskedPaymentDisplay'
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - provider
+      - status
+      - type
+      - display
+      - created_at
+      example:
+        id: 44444444-4444-4444-8444-444444444444
+        provider: stripe
+        status: pending_verification
+        type: card
+        display: {}
+        created_at: '2026-11-16T18:00:00Z'
+    PaymentMethodList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentMethodData'
+        page:
+          $ref: '#/components/schemas/CursorPage'
+      required:
+      - data
+      - page
+    BindRequest:
+      type: object
+      required:
+      - quote_id
+      - plan_selection_id
+      - payment_method_id
+      - consent
+      properties:
+        quote_id:
+          type: string
+          format: uuid
+        plan_selection_id:
+          type: string
+          format: uuid
+        payment_method_id:
+          type: string
+          format: uuid
+        consent:
+          $ref: '#/components/schemas/Consent'
+      example:
+        quote_id: 11111111-1111-4111-8111-111111111111
+        plan_selection_id: 33333333-3333-4333-8333-333333333333
+        payment_method_id: 44444444-4444-4444-8444-444444444444
+        consent:
+          accepted_at: '2026-11-16T18:00:00Z'
+          terms_version: version-agreed-during-onboarding
+    Bind:
+      type: object
+      required:
+      - data
+      properties:
+        data:
+          $ref: '#/components/schemas/BindData'
+      example:
+        data:
+          id: 55555555-5555-4555-8555-555555555555
+          status: processing
+          quote_id: 11111111-1111-4111-8111-111111111111
+          plan_selection_id: 33333333-3333-4333-8333-333333333333
+          payment:
+            status: approved
+            attempt_id: 66666666-6666-4666-8666-666666666666
+            attempt_status: pending
+            failure_code: null
+          policy:
+            id: 77777777-7777-4777-8777-777777777777
+            status: payment_pending
+          created_at: '2026-11-16T18:00:01Z'
+    Policy:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PolicyData'
+      required:
+      - data
+    PolicyData:
+      type: object
+      required:
+      - id
+      - policy_number
+      - status
+      - plan
+      - issued_at
+      - effective_at
+      - coverage
+      - billing
+      - created_at
+      - updated_at
+      properties:
+        simulated:
+          type: boolean
+          description: True only for sandbox simulator resources; no real funds or insurance coverage.
+        id:
+          type: string
+          format: uuid
+        policy_number:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+          description: 'Normalized policy state: payment_pending, pending_effective_date, in_force, cancelled,
+            pre_renewal, renewal_pending, renewal_failed, expired, needs_updated_payment_method, payroll_deduct_pending,
+            breeder_transfer_pending, test_policy, or unknown. Handle new states safely.'
+        plan:
+          type: string
+          enum:
+          - monthly
+          - annual
+        issued_at:
+          type:
+          - string
+          - 'null'
+          format: date
+          description: Issue date (calendar date, despite the _at suffix).
+        effective_at:
+          type:
+          - string
+          - 'null'
+          format: date
+          description: Coverage effective date; inspect status as well.
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        billing:
+          anyOf:
+          - $ref: '#/components/schemas/PolicyBilling'
+          - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: 77777777-7777-4777-8777-777777777777
+        policy_number: 01TX0126-001001-01
+        status: in_force
+        plan: monthly
+        issued_at: '2026-11-16'
+        effective_at: '2026-11-16'
+        coverage:
+          annual_limit: 15000
+          deductible: 500
+          reimbursement_percent: 80
+        billing:
+          status: active
+          amount: '39.00'
+          currency: USD
+          billing_source: stripe
+          next_payment_at: null
+        created_at: '2026-11-16T18:00:01Z'
+        updated_at: '2026-11-16T18:00:03Z'
+    PolicyList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyData'
+        page:
+          $ref: '#/components/schemas/CursorPage'
+      required:
+      - data
+      - page
+    WebhookEndpointRequest:
+      type: object
+      required:
+      - url
+      - event_types
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Publicly resolvable HTTPS URL without embedded credentials; redirects are not followed.
+        event_types:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        enabled:
+          type: boolean
+          default: true
+      example:
+        url: https://partner.example.test/rainwalk-events
+        event_types:
+        - bind.processing
+        - bind.bound
+        - payment.succeeded
+        - payment.failed
+        - policy.issued
+        enabled: true
+    WebhookEndpoint:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/WebhookEndpointData'
+      required:
+      - data
+    WebhookEndpointData:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        event_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        signing_secret:
+          type: string
+          readOnly: true
+          description: Returned when the partner signing key is first created and on replay of that creation
+            response. Shared by this partner’s endpoints; protect the entire response. Not returned in list/update
+            responses.
+      required:
+      - id
+      - url
+      - event_types
+      - enabled
+      - created_at
+      - updated_at
+      example:
+        id: 99999999-9999-4999-8999-999999999999
+        url: https://partner.example.test/rainwalk-events
+        event_types:
+        - bind.bound
+        - payment.failed
+        enabled: true
+        created_at: '2026-11-16T18:00:00Z'
+        updated_at: '2026-11-16T18:00:00Z'
+    WebhookEndpointList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEndpointData'
+        page:
+          $ref: '#/components/schemas/CursorPage'
+      required:
+      - data
+      - page
+    Claim:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/ClaimData'
+      required:
+      - data
+    ClaimData:
+      type: object
+      description: Allowlisted summary only; excludes documents, notes, decision rationale, and payout data.
+      properties:
+        id:
+          type: string
+          format: uuid
+        policy_id:
+          type: string
+          format: uuid
+        policy_number:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+        filed_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - policy_id
+      - policy_number
+      - status
+      - filed_at
+      - updated_at
+    ClaimSubmissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - policy_id
+      - condition_type
+      - treatment_cost
+      - veterinarian
+      - veterinarian_practice
+      - condition_summary
+      - consent
+      properties:
+        policy_id:
+          type: string
+          format: uuid
+        condition_type:
+          type: string
+          maxLength: 1024
+          minLength: 1
+        treatment_cost:
+          type: number
+          exclusiveMinimum: 0
+        veterinarian:
+          type: string
+          maxLength: 1024
+          minLength: 1
+        veterinarian_practice:
+          type: string
+          maxLength: 1024
+          minLength: 1
+        condition_summary:
+          type: string
+          maxLength: 1024
+          minLength: 1
+        consent:
+          type: object
+          required:
+          - accepted_at
+          - terms_version
+          - policyholder_authorized
+          properties:
+            accepted_at:
+              type: string
+              format: date-time
+            terms_version:
+              type: string
+              minLength: 1
+            policyholder_authorized:
+              type: boolean
+              const: true
+      example:
+        policy_id: 77777777-7777-4777-8777-777777777777
+        condition_type: Illness
+        treatment_cost: 125.5
+        veterinarian: Example Veterinarian
+        veterinarian_practice: Example Veterinary Practice
+        condition_summary: Initial notice of treatment; supporting records are handled outside this endpoint.
+        consent:
+          accepted_at: '2026-11-16T18:10:00Z'
+          terms_version: version-agreed-during-onboarding
+          policyholder_authorized: true
+    ClaimList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClaimData'
+        page:
+          $ref: '#/components/schemas/CursorPage'
+      required:
+      - data
+      - page
+    CursorPage:
+      type: object
+      required:
+      - next_cursor
+      - has_more
+      properties:
+        next_cursor:
+          type:
+          - string
+          - 'null'
+        has_more:
+          type: boolean
+    Error:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          - message
+          - request_id
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+            details:
+              description: 'Validation details vary by endpoint: a field-error object (including nested fields),
+                or a list of field details.'
+              anyOf:
+              - type: object
+                additionalProperties: true
+              - type: array
+                items: {}
+      example:
+        error:
+          code: payment_method_not_approved
+          message: The payment method cannot be used for this bind.
+          request_id: req_example
+    Money:
+      type: string
+      pattern: ^-?[0-9]+\.[0-9]{2}$
+      description: Decimal amount with two fractional digits; never a JSON float.
+      example: '42.18'
+    Coverage:
+      type: object
+      required:
+      - annual_limit
+      - deductible
+      - reimbursement_percent
+      properties:
+        annual_limit:
+          type: integer
+        deductible:
+          type: integer
+        reimbursement_percent:
+          type: integer
+    CoveragePreferences:
+      type: object
+      required:
+      - annual_limit
+      - deductible
+      - reimbursement_percent
+      properties:
+        annual_limit:
+          type: integer
+          enum:
+          - 5000
+          - 8000
+          - 10000
+          - 12000
+          - 15000
+          - 20000
+        deductible:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          multipleOf: 50
+        reimbursement_percent:
+          type: integer
+          enum:
+          - 70
+          - 80
+          - 90
+      description: Retrieve /quote-inputs for current selectable values; eligibility is checked at quote time.
+    QuoteAddress:
+      type: object
+      required:
+      - postal_code
+      - state
+      properties:
+        postal_code:
+          type: string
+          pattern: ^[0-9]{5}$
+          description: Real five-digit US ZIP matching state. Geographic availability is checked during pricing.
+        line1:
+          type:
+          - string
+          - 'null'
+          maxLength: 256
+        line2:
+          type:
+          - string
+          - 'null'
+          maxLength: 256
+          default: ''
+        city:
+          type:
+          - string
+          - 'null'
+          maxLength: 256
+        state:
+          type: string
+          pattern: ^[A-Z]{2}$
+          description: Required supported state matching postal_code. Pricing and offer issuance use both fields;
+            do not rely on ZIP-only inference.
+    QuotePolicyholderRequest:
+      type: object
+      required:
+      - email
+      - first_name
+      - last_name
+      - phone
+      - address
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 256
+        first_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        last_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        phone:
+          type: string
+          minLength: 1
+          maxLength: 256
+        address:
+          $ref: '#/components/schemas/QuoteAddress'
+      description: Only documented fields are mapped into the quote. external_customer_id is not persisted;
+        retain customer mappings in your system.
+    QuotePetRequest:
+      type: object
+      required:
+      - name
+      - species
+      - breed
+      - sex
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        species:
+          type: string
+          enum:
+          - dog
+          - cat
+        breed:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Use a canonical breed from /breed-lists for this location/species.
+        birth_date:
+          type: string
+          format: date
+          description: Actual birth date, no later than today. Rating supports age bands through 20 years;
+            eligibility still applies.
+        pet_age:
+          type: string
+          enum:
+          - 6 weeks to 11 months
+          - 1 year
+          - 2 years
+          - 3 years
+          - 4 years
+          - 5 years
+          - 6 years
+          - 7 years
+          - 8 years
+          - 9 years
+          - 10 years
+          - 11 years
+          - 12 years
+          - 13 years
+          - 14 years
+          - 15 years
+          - 16 years
+          - 17 years
+          - 18 years
+          - 19 years
+          - 20 years
+          deprecated: true
+          description: Compatibility alternative when birth_date is omitted. Use birth_date for accurate re-rating.
+        sex:
+          type: string
+          enum:
+          - female
+          - male
+        spayed_or_neutered:
+          type: boolean
+          default: true
+      anyOf:
+      - required:
+        - birth_date
+      - required:
+        - pet_age
+      description: Use birth_date for new integrations; it takes precedence over pet_age. Unknown fields are
+        not used.
+    QuotePolicyholder:
+      type: object
+      required:
+      - id
+      - email
+      - first_name
+      - last_name
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        first_name:
+          type: string
+        last_name:
+          type: string
+    QuotePet:
+      type: object
+      required:
+      - id
+      - name
+      - species
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        species:
+          type: string
+          enum:
+          - dog
+          - cat
+    QuotePrice:
+      type: object
+      required:
+      - currency
+      - premium_rate
+      - quote_total
+      properties:
+        currency:
+          type: string
+          enum:
+          - USD
+        premium_rate:
+          $ref: '#/components/schemas/Money'
+        quote_total:
+          $ref: '#/components/schemas/Money'
+      description: 'Newest offer summary: base premium and premium before processing fees. Use offers[].premium
+        for the selected price lock.'
+    PremiumBreakdown:
+      type: object
+      required:
+      - premium
+      - processing_fee
+      properties:
+        premium:
+          $ref: '#/components/schemas/Money'
+        processing_fee:
+          $ref: '#/components/schemas/Money'
+      description: Monthly components; annual totals use twelve monthly installments.
+    Premium:
+      type: object
+      required:
+      - currency
+      - monthly_total
+      - annual_total
+      properties:
+        currency:
+          type: string
+          enum:
+          - USD
+        monthly_total:
+          $ref: '#/components/schemas/Money'
+        annual_total:
+          $ref: '#/components/schemas/Money'
+        breakdown:
+          $ref: '#/components/schemas/PremiumBreakdown'
+          description: Present on newly issued offers; older saved offers may omit this breakdown.
+    PriceSnapshot:
+      type: object
+      required:
+      - annual_limit
+      - deductible
+      - reimbursement_percent
+      - billing_options
+      - premium
+      properties:
+        annual_limit:
+          type: integer
+        deductible:
+          type: integer
+        reimbursement_percent:
+          type: integer
+        billing_options:
+          type: array
+          items:
+            type: string
+            enum:
+            - monthly
+            - annual
+        premium:
+          $ref: '#/components/schemas/Premium'
+    PlanSelectionData:
+      type: object
+      required:
+      - id
+      - quote_id
+      - offer_id
+      - status
+      - billing_frequency
+      - price
+      - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        offer_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - selected
+        billing_frequency:
+          type: string
+          enum:
+          - monthly
+          - annual
+        price:
+          $ref: '#/components/schemas/PriceSnapshot'
+        created_at:
+          type: string
+          format: date-time
+    IntegerChoices:
+      type: object
+      required:
+      - type
+      - allowed_values
+      properties:
+        type:
+          type: string
+          enum:
+          - integer
+        allowed_values:
+          type: array
+          items:
+            type: integer
+    StringChoices:
+      type: object
+      required:
+      - type
+      - allowed_values
+      properties:
+        type:
+          type: string
+          enum:
+          - string
+        allowed_values:
+          type: array
+          items:
+            type: string
+    QuoteInputData:
+      type: object
+      required:
+      - coverage_preferences
+      - plan_selection
+      - pet
+      - policyholder
+      properties:
+        coverage_preferences:
+          type: object
+          required:
+          - annual_limit
+          - deductible
+          - reimbursement_percent
+          properties:
+            annual_limit:
+              $ref: '#/components/schemas/IntegerChoices'
+            deductible:
+              $ref: '#/components/schemas/IntegerChoices'
+            reimbursement_percent:
+              $ref: '#/components/schemas/IntegerChoices'
+        plan_selection:
+          type: object
+          required:
+          - billing_frequency
+          properties:
+            billing_frequency:
+              $ref: '#/components/schemas/StringChoices'
+        pet:
+          type: object
+          required:
+          - species
+          - sex
+          - birth_date
+          properties:
+            species:
+              $ref: '#/components/schemas/StringChoices'
+            sex:
+              $ref: '#/components/schemas/StringChoices'
+            birth_date:
+              type: object
+              required:
+              - type
+              - format
+              properties:
+                type:
+                  type: string
+                  enum:
+                  - string
+                format:
+                  type: string
+                  enum:
+                  - date
+        policyholder:
+          type: object
+          required:
+          - address
+          properties:
+            address:
+              type: object
+              required:
+              - state
+              properties:
+                state:
+                  $ref: '#/components/schemas/StringChoices'
+    MaskedPaymentDisplay:
+      type: object
+      properties:
+        brand:
+          type: string
+        last4:
+          type: string
+          pattern: ^[0-9]{4}$
+      description: Optional masked card metadata. May be empty; bank references currently return no card display
+        fields.
+    Consent:
+      type: object
+      required:
+      - accepted_at
+      - terms_version
+      properties:
+        accepted_at:
+          type: string
+          format: date-time
+        terms_version:
+          type: string
+          minLength: 1
+          description: Consent/policy terms version agreed during onboarding.
+        ip_address:
+          type: string
+          description: Optional IP collected only where lawful.
+    BindPayment:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - approved
+          - pending_verification
+          - rejected
+          description: Approval status of the stored payment-method reference; this is not the charge outcome.
+        attempt_id:
+          type: string
+          format: uuid
+        attempt_status:
+          type: string
+          enum:
+          - pending
+          - processing
+          - succeeded
+          - failed
+          description: Authoritative payment-attempt state when present.
+        failure_code:
+          type:
+          - string
+          - 'null'
+          description: Safe reason for a failed attempt; null when no failure is recorded.
+      description: Attempt fields are present when the bind has a payment attempt. A reference can remain approved
+        even if its charge fails.
+    BindPolicy:
+      type: object
+      required:
+      - id
+      - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          description: Current policy status normalized to lower snake case; retrieve /policies/{id} for full
+            policy details.
+    BindData:
+      type: object
+      required:
+      - id
+      - status
+      - quote_id
+      - plan_selection_id
+      - payment
+      - policy
+      - created_at
+      properties:
+        simulated:
+          type: boolean
+          description: True only for sandbox simulator resources; no real funds or insurance coverage.
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - processing
+          - bound
+          - declined
+          - payment_failed
+          - cancelled
+        quote_id:
+          type: string
+          format: uuid
+        plan_selection_id:
+          type: string
+          format: uuid
+        payment:
+          $ref: '#/components/schemas/BindPayment'
+        policy:
+          anyOf:
+          - $ref: '#/components/schemas/BindPolicy'
+          - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+    PolicyBilling:
+      type: object
+      required:
+      - status
+      - amount
+      - currency
+      - billing_source
+      - next_payment_at
+      properties:
+        status:
+          type: string
+          description: Subscription state, currently pending, active, suspended, cancelled, or inactive.
+        amount:
+          anyOf:
+          - $ref: '#/components/schemas/Money'
+          - type: 'null'
+        currency:
+          type: string
+          enum:
+          - USD
+        billing_source:
+          type: string
+          description: Provider/source label in lower case, currently stripe, oneinc, franpos, or unknown.
+        next_payment_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+      description: Latest active subscription summary. Amount is its recorded subscription amount, not a receipt
+        or total-charge guarantee.
+    WebhookEventType:
+      type: string
+      enum:
+      - bind.processing
+      - bind.bound
+      - bind.declined
+      - payment.succeeded
+      - payment.failed
+      - policy.issued
+      - policy.status_changed
+    WebhookEndpointUpdateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Publicly resolvable HTTPS URL without embedded credentials; redirects are not followed.
+        event_types:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        enabled:
+          type: boolean
+      example:
+        enabled: false
+    WebhookEventData:
+      type: object
+      properties:
+        bind_id:
+          type: string
+          format: uuid
+        payment_attempt_id:
+          type: string
+          format: uuid
+        policy_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        failure_code:
+          type: string
+        provider_reference:
+          type: string
+          description: Opaque provider transaction reference; never treat its presence as proof of settlement.
+      description: Fields depend on the event type. Treat as a notification and retrieve the referenced bind/policy.
+        New fields may be added.
+    WebhookEvent:
+      type: object
+      required:
+      - id
+      - type
+      - occurred_at
+      - api_version
+      - data
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/WebhookEventType'
+        occurred_at:
+          type: string
+          format: date-time
+        api_version:
+          type: string
+          enum:
+          - v1
+        data:
+          $ref: '#/components/schemas/WebhookEventData'
+      example:
+        id: 88888888-8888-4888-8888-888888888888
+        type: bind.bound
+        occurred_at: '2026-11-16T18:00:03Z'
+        api_version: v1
+        data:
+          bind_id: 55555555-5555-4555-8555-555555555555
+          policy_id: 77777777-7777-4777-8777-777777777777
+          status: bound
+webhooks:
+  partnerEvent:
+    post:
+      summary: Rainwalk event delivered to your registered HTTPS endpoint
+      description: Verify HMAC-SHA256 over timestamp + dot + unaltered body; reject timestamps outside five
+        minutes, deduplicate event IDs, and acknowledge within 10 seconds. See receiver guide.
+      parameters:
+      - name: X-Rainwalk-Event-Id
+        in: header
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: X-Rainwalk-Timestamp
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9]+$
+      - name: X-Rainwalk-Signature
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^v1=[a-f0-9]{64}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEvent'
+      responses:
+        '200':
+          description: Event durably accepted or valid duplicate acknowledged.
+      security: []
