@@ -103,6 +103,10 @@ payment or issue a policy.
 
 ## Stripe reference registration and purchase
 
+The sandbox supports the SDK’s quote-to-bind flow with simulated payment outcomes.
+It does not send customer emails or generate policy documents. Test policy records
+are available through the API.
+
 For first integration testing without a Stripe account, authenticated sandbox
 partners with the required v1 grants can use the simulator by default:
 
